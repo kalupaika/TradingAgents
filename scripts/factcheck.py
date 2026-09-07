@@ -7,6 +7,7 @@ what the reports actually claim, plus a look-ahead scan for dates past the
 analysis date. It is fully deterministic — no LLM calls.
 
 What it checks:
+  Against market data —
   * look-ahead   — any report referencing a date after the analysis date
   * indicators   — RSI / MACD / MACD-signal / 50-SMA / 200-SMA / ATR claims vs
                    values recomputed as of the analysis date
@@ -15,6 +16,11 @@ What it checks:
                    trading range of the trailing window
   * entry price  — the trader's entry vs the last close
   * grounding    — flags a technical report that cites no indicator numbers
+  Internal consistency (report cross-reads, no market data) —
+  * signal-alignment — final decision vs the net directional lean of the analysts
+  * calibration      — "high conviction" language over a heavily hedged rationale
+  * traceability     — final decision that never engages the bull/bear debate, or
+                       overrides the trader without addressing the technical case
 
 Usage:
   python scripts/factcheck.py                    # most recent run
@@ -266,6 +272,137 @@ def _check_prices(truth: dict, market: str, trader: str, findings: list[Finding]
         ))
 
 
+# --------------------------------------------------------------------------- #
+# internal consistency (no market data — cross-reads the reports themselves)
+# --------------------------------------------------------------------------- #
+_BULL = (
+    "bullish", "outperform", "upside", "undervalued", "accumulate", "overweight",
+    "uptrend", "breakout", "rally", "tailwind", "strong buy", "long position",
+)
+_BEAR = (
+    "bearish", "underperform", "downside", "overvalued", "underweight", "short position",
+    "downtrend", "breakdown", "selloff", "sell-off", "headwind", "strong sell", "deteriorat",
+)
+_HEDGE = (
+    "however", "although", "unclear", "ambiguous", "uncertain", "conflicting", "mixed signal",
+    "on the other hand", "that said", "not guaranteed", "speculative", "hard to say",
+    "remains to be seen", "caution", "wait for", "lack of clarity", "too early",
+)
+_CONVICTION = (
+    "strong buy", "strong sell", "high confidence", "high conviction", "decisive",
+    "compelling case", "unambiguous", "strongly recommend", "clear buy", "clear sell",
+    "conviction is high",
+)
+_DEBATE_TOKENS = ("bull", "bear", "aggressive analyst", "conservative analyst",
+                  "neutral analyst", "debate", "research manager", "risk team")
+
+_BUY_SIDE = {"BUY", "STRONG BUY"}
+_SELL_SIDE = {"SELL", "STRONG SELL"}
+
+
+def _side(direction: str | None) -> str | None:
+    """Collapse STRONG BUY/BUY -> BUY etc. so same-direction calls compare equal."""
+    if direction in _BUY_SIDE:
+        return "BUY"
+    if direction in _SELL_SIDE:
+        return "SELL"
+    return direction  # HOLD or None
+
+
+def _count(text: str, needles) -> int:
+    return sum(text.count(n) for n in needles)
+
+
+def _lean(name: str, text: str) -> float:
+    """Directional lean of one analyst report in [-1, 1] (0 = neutral/unclear)."""
+    low = text.lower()
+    if name == "sentiment_report.md":
+        m = re.search(r"overall sentiment[:\s*]+\**\s*(bullish|bearish|neutral)", low)
+        if m:
+            return {"bullish": 0.6, "bearish": -0.6, "neutral": 0.0}[m.group(1)]
+    bull, bear = _count(low, _BULL), _count(low, _BEAR)
+    if bull + bear < 4:
+        return 0.0
+    return round((bull - bear) / (bull + bear), 2)
+
+
+def _check_consistency(reports_dir: Path, findings: list[Finding]) -> None:
+    final = digest._read(reports_dir, "final_trade_decision.md")
+    trader = digest._read(reports_dir, "trader_investment_plan.md")
+    plan = digest._read(reports_dir, "investment_plan.md")
+    if not final:
+        findings.append(Finding("ERROR", "consistency", "final_trade_decision.md missing"))
+        return
+
+    decision = digest._norm_direction(
+        digest._first(r"final trading decision\s*:?\s*\*{0,2}\s*([A-Za-z ]+)", final)
+        or digest._first(r"final transaction proposal\s*:?\s*\*{0,2}\s*([A-Za-z ]+)", final)
+        or final[:400]
+    )
+    if not decision:
+        findings.append(Finding(
+            "ERROR", "consistency", "no parseable decision in final_trade_decision.md"))
+        return
+
+    # 1. Analyst signals vs the decision.
+    leans = {
+        n: _lean(n, digest._read(reports_dir, n))
+        for n in ("market_report.md", "sentiment_report.md",
+                  "news_report.md", "fundamentals_report.md")
+        if (reports_dir / n).is_file()
+    }
+    scored = [v for v in leans.values() if v != 0.0]
+    if scored:
+        net = sum(scored) / len(scored)
+        detail = ", ".join(f"{k.split('_')[0]} {v:+g}" for k, v in leans.items() if v)
+        if decision in _BUY_SIDE and net <= -0.34:
+            findings.append(Finding(
+                "WARN", "signal-alignment",
+                f"decision is {decision} but analyst reports lean bearish "
+                f"(net {net:+.2f}: {detail})",
+            ))
+        elif decision in _SELL_SIDE and net >= 0.34:
+            findings.append(Finding(
+                "WARN", "signal-alignment",
+                f"decision is {decision} but analyst reports lean bullish "
+                f"(net {net:+.2f}: {detail})",
+            ))
+
+    # 2. Confidence calibration — strong conviction language over a hedged rationale.
+    blob = (final + "\n" + trader).lower()
+    rating = digest._first(r"rating\s*:?\s*\*{0,2}\s*(strong buy|strong sell)", final)
+    conviction = bool(rating) or _count(blob, _CONVICTION) > 0
+    hedges = _count(blob, _HEDGE)
+    if conviction and hedges >= 5:
+        findings.append(Finding(
+            "WARN", "calibration",
+            f"decision asserts high conviction but the rationale hedges {hedges} times "
+            "(however / unclear / conflicting / …)",
+        ))
+
+    # 3. Does the final decision actually engage the bull/bear debate?
+    if plan and not any(tok in final.lower() for tok in _DEBATE_TOKENS):
+        findings.append(Finding(
+            "WARN", "traceability",
+            "final_trade_decision.md never references the bull/bear debate or the "
+            "research-manager view it is supposed to synthesise",
+        ))
+
+    # 4. Risk team overrode the trader without addressing why.
+    trader_action = digest._norm_direction(
+        digest._first(r"(?:^|\n)\s*\*{0,2}action\*{0,2}\s*:\s*\*{0,2}\s*([A-Za-z ]+)", trader)
+        or digest._first(r"final transaction proposal\s*:?\s*\*{0,2}\s*([A-Za-z ]+)", trader)
+    )
+    if trader_action and _side(trader_action) != _side(decision):
+        low = final.lower()
+        if "trader" not in low and "technical" not in low:
+            findings.append(Finding(
+                "INFO", "traceability",
+                f"final decision ({decision}) overrides the trader ({trader_action}) but "
+                "the rationale doesn't mention the trader or the technical case it set aside",
+            ))
+
+
 def _check_lookahead(reports_dir: Path, as_of: str, findings: list[Finding]) -> None:
     cutoff = datetime.strptime(as_of, "%Y-%m-%d")
     horizon = cutoff + timedelta(days=1)
@@ -301,6 +438,7 @@ def run_factcheck(run_dir: Path) -> FactCheck:
         return fc
 
     _check_lookahead(reports, fc.date, fc.findings)
+    _check_consistency(reports, fc.findings)
 
     try:
         fc.truth = _compute_truth(fc.ticker, fc.date)
@@ -323,14 +461,15 @@ def render(fc: FactCheck) -> str:
     t = fc.truth
     lines = [f"{fc.ticker} — {fc.date}   fact-check: {'PASS' if fc.ok else 'FAIL'}"]
     if fc.error:
-        lines.append(f"  ERROR: {fc.error}")
-        return "\n".join(lines)
-    lines.append(
-        f"  truth @ {t['as_of_bar']} ({t['bars']} bars): close {t['last_close']}  "
-        f"RSI-14 {t['rsi_14']}  MACD {t['macd']}/{t['macd_signal']}  "
-        f"50SMA {t['sma_50']}  200SMA {t['sma_200']}  ATR {t['atr_14']}  "
-        f"{t['window_days']}d range {t['window_low']}–{t['window_high']}"
-    )
+        lines.append(f"  ! ground truth unavailable: {fc.error}")
+        lines.append("  (price/indicator checks skipped; consistency checks still ran)")
+    else:
+        lines.append(
+            f"  truth @ {t['as_of_bar']} ({t['bars']} bars): close {t['last_close']}  "
+            f"RSI-14 {t['rsi_14']}  MACD {t['macd']}/{t['macd_signal']}  "
+            f"50SMA {t['sma_50']}  200SMA {t['sma_200']}  ATR {t['atr_14']}  "
+            f"{t['window_days']}d range {t['window_low']}–{t['window_high']}"
+        )
     if not fc.findings:
         lines.append("  ✓ no discrepancies found")
     for f in sorted(fc.findings, key=lambda x: {"ERROR": 0, "WARN": 1, "INFO": 2}[x.level]):

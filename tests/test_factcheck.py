@@ -138,3 +138,114 @@ def test_render_shape():
     assert out.startswith("AAPL — 2026-01-14   fact-check: FAIL")
     assert "RSI-14 54.0" in out
     assert "✗ [grounding]" in out
+
+
+def test_render_keeps_findings_when_truth_unavailable():
+    fc = factcheck.FactCheck(ticker="X", date="2026-01-14", run_dir=Path("/tmp/x"),
+                             error="network down")
+    fc.findings.append(factcheck.Finding("WARN", "calibration", "hedged"))
+    out = factcheck.render(fc)
+    assert "ground truth unavailable" in out
+    assert "[calibration]" in out
+
+
+# --- internal-consistency checks ------------------------------------------- #
+
+def _consistency_run(tmp_path, **files):
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    for name, text in files.items():
+        (reports / f"{name}.md").write_text(text, encoding="utf-8")
+    findings = []
+    factcheck._check_consistency(reports, findings)
+    return findings
+
+
+def test_lean_uses_explicit_sentiment_marker():
+    assert factcheck._lean("sentiment_report.md", "Overall Sentiment: **Bearish** (3/10)") < 0
+    assert factcheck._lean("sentiment_report.md", "Overall Sentiment: Bullish") > 0
+
+
+def test_lean_keyword_tally_needs_minimum_signal():
+    assert factcheck._lean("news_report.md", "one bearish note") == 0.0
+    assert factcheck._lean(
+        "news_report.md", "bearish downside headwind underperform overvalued breakdown"
+    ) < 0
+
+
+def test_signal_alignment_flags_buy_against_bearish_analysts(tmp_path):
+    findings = _consistency_run(
+        tmp_path,
+        final_trade_decision="**Final Trading Decision: Buy**\nThe bull case wins on balance.",
+        trader_investment_plan="**Action**: Buy\n",
+        investment_plan="**Recommendation**: Buy\n",
+        market_report="bearish breakdown downtrend selloff headwind underperform",
+        sentiment_report="Overall Sentiment: Bearish",
+        news_report="bearish downside headwind underperform overvalued",
+        fundamentals_report="bearish overvalued downside deteriorat",
+    )
+    assert any(f.check == "signal-alignment" and f.level == "WARN" for f in findings)
+
+
+def test_no_signal_alignment_flag_when_aligned(tmp_path):
+    findings = _consistency_run(
+        tmp_path,
+        final_trade_decision="**Final Trading Decision: Buy**\nThe bull case is strong.",
+        trader_investment_plan="**Action**: Buy\n",
+        investment_plan="**Recommendation**: Buy\n",
+        market_report="bullish breakout uptrend rally accumulate outperform",
+        sentiment_report="Overall Sentiment: Bullish",
+    )
+    assert not any(f.check == "signal-alignment" for f in findings)
+
+
+def test_calibration_flags_conviction_over_hedged_rationale(tmp_path):
+    findings = _consistency_run(
+        tmp_path,
+        final_trade_decision=(
+            "**Final Trading Decision: Strong Buy**\nA compelling case. However unclear, "
+            "conflicting, uncertain, mixed signal, too early, caution warranted, that said."
+        ),
+        trader_investment_plan="**Action**: Buy\n",
+        investment_plan="**Recommendation**: Buy\n",
+        market_report="bullish breakout",
+    )
+    assert any(f.check == "calibration" for f in findings)
+
+
+def test_traceability_flags_decision_ignoring_debate(tmp_path):
+    findings = _consistency_run(
+        tmp_path,
+        final_trade_decision="**Final Trading Decision: Hold**\nMacro is murky so we wait.",
+        investment_plan="**Recommendation**: Hold\n\nThe bull and bear debated at length.",
+        market_report="bullish breakout",
+    )
+    assert any(f.check == "traceability" and f.level == "WARN" for f in findings)
+
+
+def test_traceability_ok_when_debate_referenced(tmp_path):
+    findings = _consistency_run(
+        tmp_path,
+        final_trade_decision=(
+            "**Final Trading Decision: Hold**\nThe Aggressive Analyst and Conservative "
+            "Analyst disagree; the research manager's Hold stands."
+        ),
+        investment_plan="**Recommendation**: Hold\n",
+        market_report="bullish breakout",
+    )
+    assert not any(f.check == "traceability" for f in findings)
+
+
+def test_strong_buy_not_treated_as_override_of_buy(tmp_path):
+    findings = _consistency_run(
+        tmp_path,
+        final_trade_decision="**Final Trading Decision: Strong Buy**\nBull and bear both weighed.",
+        trader_investment_plan="**Action**: Buy\n",
+        investment_plan="**Recommendation**: Buy\n",
+    )
+    assert not any(f.check == "traceability" and f.level == "INFO" for f in findings)
+
+
+def test_unparseable_decision_is_error(tmp_path):
+    findings = _consistency_run(tmp_path, final_trade_decision="the committee could not agree")
+    assert findings and findings[0].level == "ERROR" and findings[0].check == "consistency"
