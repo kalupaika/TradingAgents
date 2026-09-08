@@ -267,8 +267,10 @@ _, decision = ta.propagate("NVDA", "2026-01-15")
 This fork adds tooling around the pipeline in [`scripts/`](scripts/): `digest.py`
 (a one-screen brief per run), `factcheck.py` (a deterministic gate — indicators
 recomputed from OHLCV, look-ahead scan, consistency checks), `batch.py` (watchlist
-/ ensemble runner), and `bundle.py` (packages a run for a Claude.ai chat). See
-[WRAPPERS.md](WRAPPERS.md).
+/ ensemble runner), and `bundle.py` (packages a run for a Claude.ai chat), plus
+`fundamentals.py`, a deterministic ratio/scorecard analyzer (Altman Z, Piotroski
+F, multi-tab HTML) that makes no recommendation — a counterpoint to the LLM
+pipeline. See [WRAPPERS.md](WRAPPERS.md).
 
 ## Reproducibility
 

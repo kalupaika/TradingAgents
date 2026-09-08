@@ -5,8 +5,11 @@ usable day to day: a one-screen brief, a deterministic fact-check gate, a
 watchlist / ensemble runner, and a packager that hands a run to a Claude.ai chat
 for a web-grounded second opinion.
 
-All four live in [`scripts/`](scripts/), depend only on what the project already
-installs, and share the same conventions:
+A fifth tool, [`fundamentals.py`](scripts/fundamentals.py), is a standalone
+counterpoint to the whole pipeline — see the last section.
+
+The wrappers live in [`scripts/`](scripts/), depend only on what the project
+already installs, and share the same conventions:
 
 - positional `[TICKER] [DATE]` (default: the most recent run), or `--path <run dir>`
 - runs are read from `$TRADINGAGENTS_RESULTS_DIR`, else `$TRADINGAGENTS_HOME/logs`,
@@ -182,6 +185,35 @@ happen, are these fundamentals real) — the numeric price/indicator claims are
 already covered deterministically by `factcheck.py`.
 
 ---
+
+## fundamentals.py — the deterministic counterpoint
+
+Not a wrapper around a run — a different way of answering the same question.
+Where TradingAgents runs a multi-agent LLM debate and lands on a Buy/Hold/Sell,
+`fundamentals.py` pulls the reported financials, computes the standard ratios
+itself, and renders a multi-tab HTML report that *characterises* the company as
+of its last filing. No LLM, no forecast, no recommendation — every number shows
+its inputs and source period, and a Data Quality tab lists what's missing or
+distorted (negative-equity ROE, stale statements, a market cap yfinance dropped).
+
+```bash
+python scripts/fundamentals.py AAPL                  # writes AAPL_fundamentals.html
+python scripts/fundamentals.py AAPL --mode quick     # compact text table
+python scripts/fundamentals.py AAPL MSFT NVDA --mode compare
+python scripts/fundamentals.py RELIANCE.NS -o r.html # US + Indian tickers
+```
+
+Tabs: Overview · Valuation (P/E, PEG, EV/EBITDA, FCF yield, …) · Profitability
+(margins, ROE/ROA/ROIC) · Growth (3y/5y CAGR from the annual statements) ·
+Financial health (liquidity, leverage, **Altman Z-Score** and **Piotroski
+F-Score** with every component shown) · Capital returns · Data quality.
+
+Run it next to a TradingAgents analysis of the same ticker to compare the two
+approaches directly: the LLM's `fundamentals_report.md` narrative against the
+computed evidence, and the pipeline's decision against a scorecard that refuses
+to make one.
+
+Data source: Yahoo Finance (`yfinance`) — annual statements + key stats.
 
 ## Local, no-API workflow
 

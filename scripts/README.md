@@ -13,6 +13,7 @@ python scripts/digest.py [TICKER] [DATE]      # one-screen brief of a run
 python scripts/factcheck.py [TICKER] [DATE]   # deterministic validation gate
 python scripts/batch.py --watchlist wl.txt    # run a watchlist / ensemble
 python scripts/bundle.py [TICKER] --mode both # package for a Claude.ai chat
+python scripts/fundamentals.py [TICKER]       # deterministic ratio/scorecard HTML
 ```
 
 Each takes `[TICKER] [DATE]` (default: latest run) or `--path <run dir>`, plus
