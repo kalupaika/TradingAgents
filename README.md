@@ -262,6 +262,14 @@ ta = TradingAgentsGraph(config=config)
 _, decision = ta.propagate("NVDA", "2026-01-15")
 ```
 
+## Wrapper tools
+
+This fork adds tooling around the pipeline in [`scripts/`](scripts/): `digest.py`
+(a one-screen brief per run), `factcheck.py` (a deterministic gate — indicators
+recomputed from OHLCV, look-ahead scan, consistency checks), `batch.py` (watchlist
+/ ensemble runner), and `bundle.py` (packages a run for a Claude.ai chat). See
+[WRAPPERS.md](WRAPPERS.md).
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.
